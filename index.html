@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no"/>
+  <title>Costume Face (без AR-движков)</title>
+  <style>
+    html,body{margin:0;height:100%;overflow:hidden;background:#000}
+    #wrap{position:fixed;inset:0}
+    video{position:absolute;inset:0;width:100%;height:100%;object-fit:cover;transform:scaleX(-1)} /* зеркало */
+    #mask{
+      position:absolute;left:50%;top:50%;
+      transform:translate(-50%,-50%) scale(1);
+      transform-origin:center center;
+      pointer-events:none;
+      will-change:transform;
+    }
+    .hint{position:fixed;left:0;right:0;bottom:10px;color:#fff;text-align:center;
+      font:14px/1.35 system-ui,-apple-system,Segoe UI,Roboto,Arial;opacity:.9}
+    .err{position:fixed;left:0;right:0;top:0;background:#b00020;color:#fff;padding:8px;display:none;text-align:center}
+  </style>
+</head>
+<body>
+  <div class="err" id="err"></div>
+  <div id="wrap">
+    <video id="v" autoplay playsinline muted></video>
+    <img id="mask" src="./mask.png" alt="mask" />
+  </div>
+  <div class="hint">Разреши камеру. Держи лицо в кадре — костюм «пришьётся» к голове.</div>
+
+  <!-- MediaPipe FaceMesh (старая, но стабильная версия для браузера) -->
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/camera_utils/camera_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/drawing_utils/drawing_utils.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/face_mesh.js"></script>
+
+  <script>
+    const errEl = document.getElementById('err');
+    const video = document.getElementById('v');
+    const maskEl = document.getElementById('mask');
+
+    // Базовые коэффициенты подгонки маски (можно подправить под свой файл)
+    const WIDTH_K = 1.75;    // во сколько раз шире расстояния "висок-висок"
+    const Y_OFFSET = 0.08;   // сдвиг маски вверх/вниз относительно носа (в долях высоты маски, +вниз)
+
+    // Стартуем камеру
+    (async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+      } catch(e) {
+        errEl.textContent = 'Нет доступа к камере: ' + e.message; errEl.style.display = 'block';
+      }
+    })();
+
+    // Готовим FaceMesh
+    const faceMesh = new FaceMesh.FaceMesh({
+      locateFile: (file) => `https://cdn.jsdelivr.net/npm/@mediapipe/face_mesh/${file}`
+    });
+    faceMesh.setOptions({
+      maxNumFaces: 1,
+      refineLandmarks: true,
+      minDetectionConfidence: 0.5,
+      minTrackingConfidence: 0.5
+    });
+
+    faceMesh.onResults(onResults);
+
+    // Прогоняем кадры с помощью CameraUtils (устойчиво на iOS)
+    const cam = new CameraUtils.Camera(video, {
+      onFrame: async () => { await faceMesh.send({image: video}); },
+      width: 720, height: 1280
+    });
+    cam.start();
+
+    function onResults(res){
+      if (!res.multiFaceLandmarks || !res.multiFaceLandmarks.length) return;
+      const lm = res.multiFaceLandmarks[0];
+
+      // Индексы landmark’ов (MediaPipe):
+      // 1 — кончик носа, 234 — левый висок, 454 — правый висок (для пользователя: лев/прав — зеркально)
+      const nose = lm[1];
+      const templeL = lm[234];
+      const templeR = lm[454];
+
+      // Получаем реальные размеры в пикселях текущего видео-элемента
+      const vw = video.clientWidth;
+      const vh = video.clientHeight;
+
+      // Конвертируем нормированные координаты [0..1] в пиксели
+      const toPx = (p) => ({ x: p.x * vw, y: p.y * vh });
+
+      const Pn = toPx(nose);
+      const Pl = toPx(templeL);
+      const Pr = toPx(templeR);
+
+      // Ширина головы ~ расстояние между висками
+      const headW = Math.hypot(Pr.x - Pl.x, Pr.y - Pl.y);
+
+      // Ставим центр маски в точку носа, масштабируем по ширине
+      const maskW = headW * WIDTH_K;
+      // Соотношение сторон берём из реальной картинки после загрузки
+      const ar = maskEl.naturalWidth && maskEl.naturalHeight ? (maskEl.naturalWidth / maskEl.naturalHeight) : 1;
+      const maskH = maskW / ar;
+
+      // Сдвиг вниз/вверх (высота маски * коэффициент)
+      const y = Pn.y + maskH * Y_OFFSET;
+
+      // Применяем CSS-трансформацию
+      maskEl.style.width = maskW + 'px';
+      maskEl.style.height = 'auto';
+      maskEl.style.transform = `translate(${Pn.x - maskW/2}px, ${y - maskH/2}px) scaleX(-1)`; // scaleX(-1) — чтобы маска совпадала с зеркальным видео
+    }
+
+    // Если маска не успела прогрузиться — подождём и начнём апдейт
+    if (!maskEl.complete) {
+      maskEl.onload = () => {};
+    }
+  </script>
+</body>
+</html>
